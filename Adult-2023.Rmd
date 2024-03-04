@@ -1,0 +1,1382 @@
+---
+title: "Adults-2023"
+author: "Solym Manou-Abi"
+date: "2023-12-30"
+output:
+  word_document: default
+  html_document: default
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+# Required packages
+```{r warning=FALSE, message=FALSE}
+source("shift_grid.R")
+source("Utilities.R")
+#source("AdultDataCleaning.R")
+#source("AdultDataCleaning 2.R")
+# REQUIRED PACKAGES
+# -----------------------------------------------------------------------------#
+library(gstat)
+library(spacetime)
+library(vegan)
+library(GGally)
+library(ggplot2)
+library(ggthemes)
+library(tidyverse)
+library(dplyr)
+library(tidyr)
+library(readxl)
+library(openxlsx)
+library(sf)
+library(readxl)
+library(lubridate)
+library(mgcv)
+library(mice)
+library(reshape2)
+library(caret)
+library(stringr)
+install.packages("rgdal")
+library(automap)
+library(MapGAM)
+library(gstat)
+library(forecast)
+library(zoo)
+library(flextable)
+library(parallel)
+library(cowplot)
+library(fields)
+library(FRK)
+library(xtable)
+library(leaps) 
+library(lmtest) 
+library(nlme)
+library(maps)
+library(animation)
+library(rstatix)
+source("shift_grid.R")
+# -----------------------------------------------------------------------------#
+# IMPORTING SHAPEFILES AND OTHER REQUIRE CONTOUR TO MAKE GRIDS
+# -----------------------------------------------------------------------------#
+#### Importing the shapefile
+shp_path <- "./Data/Data-Analysis-Mosquito/Shapefile-Mayotte/"
+myt_map <- read_sf(paste0(shp_path, "976_Village.shp")) %>% 
+  mutate(commune = ifelse(commune %in% c("BOUENI", "BOUNENI"), "BOUENI", commune),
+         village = gsub("Mtzamboro", "Mtsamboro", village))
+
+myt_map_commune <- read_sf(paste0(shp_path, "976_Commune.shp"))
+myt_map_commune$commune=c("Dzaoudzi","Pamandzi","Acoua","Mamoudzou","Dembeni","Boueni","Kani-Keli","Chirongui","Bandrele","Bandraboua","Koungou","Mtsangamouji","Tsingoni","Chiconi","Ouangani","Sada","Mtsamboro")
+myt_map_commune$commune=toupper(myt_map_commune$commune)
+
+
+#myt_map_commune <- read_sf(paste0(shp_path, "976_Commune.shp")) %>% 
+ # mutate(commune = gsub("e","\xe9", commune),
+  #       commune = ifelse(commune == "BOUNENI", "BOUENI", commune))
+
+
+#myt_mapOGR <- readOGR(paste0(shp_path, "976_Commune.shp"), verbose = F)
+#myt_mapOGR@data <- myt_mapOGR@data %>% 
+ # mutate(commune = gsub("\xe9", "e", commune),
+  #       commune = ifelse(commune == "BOUNENI", "BOUENI", commune))
+
+# -----------------------------------------------------------------------------#
+# LISTE DES FONCTIONS UTILES A NOS ANALYSES
+# -----------------------------------------------------------------------------#
+library(data.table)
+library(stringr)
+
+minuscule <- function(x){
+  sapply(x, function(xx){
+    xx <- tolower(xx)
+    xx <- strsplit(xx, split = "")[[1]]
+    xx[1] <- toupper(xx[1])
+    xx <- paste0(xx, collapse = "")
+    xx
+  }) %>% as.character()
+}
+
+missing_cols <- function(x, trhld = 0.9) {
+  idx <- which(colMeans(is.na(x)) >= trhld)
+  x <- x[-idx]
+  x
+}
+
+
+convert_hm <- function(x){
+  y <- character()
+  # which x is not a number
+  y[grepl("[0-9]H[0-9]", x)] <- paste0(gsub("H", ":", x[grepl("[0-9]H[0-9]", x)]), ":00")
+  a <- as.character(structure(as.integer(86400*as.numeric(x[!grepl("[0-9]H[0-9]", x)])), class="ITime"))
+  y[!grepl("[0-9]H[0-9]", x)] <- a
+  # y <- hms(y, roll = TRUE)
+  y
+}
+
+
+# convert_hm(x)
+count_zeros <- function(x, na.rm = FALSE){
+  if (na.rm){
+    x <- x[!is.na(x)]
+  } 
+  
+  id1s <- c(0, which(x == 1), length(x) + 1)
+  longest_run <- max(diff(id1s)) - 1
+  
+  longest_run
+}
+
+
+all_zeros <- function(x, na.rm = FALSE){
+  if (na.rm){
+    x <- x[!is.na(x)]
+  } 
+  sum(x == 0)
+}
+
+# a <- count_zeros(sample(0:1, size = 20, replace = TRUE))
+
+# fonction qui compte le nombre max de jours sans pluies
+comptage_0 <- count_zeros
+
+nsp_max <- function(x, period = 7){
+  n <- length(x)
+  jumps <- seq(1, n, by = period)
+  nval_y <- c()
+  
+  for (i in 1:(length(jumps)-1)){
+    y <- x[(jumps[i]):(jumps[i+1]-1)]
+    nval_y <- c(nval_y, comptage_0(y))
+  }
+  
+  nval_y
+}
+
+# bind_cols(dates = dates, x = x, cumul = cumulate(dates, x, 14)$cumul, maxj_sp = cumulate(dates, x, 14)$maxj_sp) %>% View()
+
+# special function that will calculate the sum of and will return NA where all
+# are NA and sum with na.rm = TRUE where there is non-NA value in list
+
+sp_sum <- function(x){
+  if (all(is.na(x))){
+    return(NA)
+  } else {
+    sum(x, na.rm = TRUE)
+  }
+}
+
+sp_mean <- function(x){
+  if (all(is.na(x))){
+    return(NA)
+  } else {
+    mean(x, na.rm = TRUE)
+  }
+}
+
+sp_d <- function(x){
+  if (all(is.na(x))){
+    return(NA)
+  } else {
+    sd(x, na.rm = TRUE)
+  }
+}
+
+
+sp_func <- function(x, fun = mean){
+  if (all(is.na(x))){
+    return(NA)
+  } else {
+    fun(x, na.rm = TRUE)
+  }
+}
+
+
+# distance euclidienne
+eucl_dist <- function(x, y) {
+  sqrt(sum((x-y)^2))
+}
+
+r_dist <- function(x, y){
+  d2 <- apply(x, 1, function(xx){
+    apply(y, 1, function(y){
+      eucl_dist(xx, y)
+    })
+  })
+  d2
+}
+
+# cette function trouve les points les plus proches de x dans la base df a 
+# partir de la distance
+# @new_x: le nouveau point
+# @df: la base de donnees contenant les n points
+# @k: le nombre de proches voisins
+
+knn_match <- function(new_x, df, x.name = "X", y.name = "Y", 
+                      var_name = "commune", k = 1,
+                      display_all = TRUE) {
+  n <- nrow(new_x)
+  colnames(new_x) <- paste0("new_", names(new_x))
+  df_xy <- df[, c(x.name, y.name)]
+  
+  if (n == 1){
+    d <- apply(df_xy, 1, function(y){
+      eucl_dist(new_x, y)
+    })
+    
+    id_neighbors <- order(d)[1:k]
+    df_newx <- bind_cols(new_x, df[id_neighbors,])
+    df_newx
+  } else {
+    # for each new_x do what was done above
+    for (i in 1:n){
+      x <- new_x[i,]
+    }
+    df_newx <- apply(new_x, 1, function(x){
+      d <- apply(df_xy, 1, function(y){
+        eucl_dist(x, y)
+      })
+      id_neighbors <- order(d)[1:k]
+      bind_cols("new_X" = x[1], "new_Y" = x[2], df[id_neighbors,])
+    }) %>% bind_rows()
+    
+    if (display_all){
+      df_newx
+    } else {
+      df_newx %>% split(., .$new_X) %>% 
+        lapply(function(x){
+          classes <- x[[var_name]]
+          # find the modal class
+          mod_class <- which.max(table(classes)) %>% names() %>% sample(., size = 1)
+          x %>% filter_(paste0(var_name, " == " , "'", mod_class, "'")) %>% 
+            .[1,]
+        }) %>% bind_rows()
+    }
+  }
+}
+
+
+# use knn_match to add covariates to a grid
+add_covariates <- function(grid, data){
+  res <- knn_match(grid, data)
+  res <- res %>% dplyr::select(-X, -Y, X = new_X, Y = new_Y)
+  res
+}
+
+
+# fix year of a date
+fix_year <- function(new_year, x){
+  x <- ymd(x)
+  
+  year(x) <- new_year
+  x
+}
+
+
+min_max <- function(x, na.rm = TRUE){
+  (x - min(x, na.rm = na.rm))/(max(x, na.rm = na.rm) - min(x, na.rm = na.rm))
+}
+
+# getting coordinate limits 
+get_coord_limits <- function(x, y){
+  list(lon = c(min = min(x), max = max(x)),
+       lat = c(min = min(y), max = max(y))
+  )
+}
+
+# new version of scale
+scale_new <- function(x){
+  sapply(x, function(a){
+    scale(a[!is.na(a)])
+  })
+}
+
+
+
+## 
+nlastdays_cumul <- function(x, h = 7, FUN = sum, probs = NULL){
+  n <- length(x)
+  cumx <- c()
+  
+  for (i in 1:(n)){
+    if ((i-h+1) < 0){
+      if (identical(FUN, quantile)){
+        cumx[i] <- FUN(x[i:1], probs = probs)
+      } else {
+        cumx[i] <- FUN(x[i:1])
+      }
+      
+    } else {
+      if (identical(FUN, quantile)){
+        cumx[i] <- FUN(x[(i-h+1):i], probs = probs)
+      } else {
+        cumx[i] <- FUN(x[(i-h+1):i])
+      }
+    }
+  }
+  return(cumx)
+}
+
+
+consecdays_quantile <- function(x, h = 7, FUN = count_zeros, probs = NULL, direction = ">="){
+  n <- length(x)
+  cumx <- c()
+  for (i in 1:(n)){
+    if ((i-h+1) < 0){
+      z <- quantile(x[i:1], probs = probs)
+      if (direction == ">="){
+        cumx[i] <- FUN(1 - (x[i:1] >= z))
+      } 
+      
+      if (direction == ">") {
+        cumx[i] <- FUN(1 - (x[i:1] > z))
+      }
+      
+      if (direction == "<=") {
+        cumx[i] <- FUN(1 - (x[i:1] <= z))
+      }
+      
+      if (direction == "<") {
+        cumx[i] <- FUN(1 - (x[i:1] < z))
+      }
+    } else {
+      z <- quantile(x[(i-h+1):i], probs = probs)
+      if (direction == ">="){
+        cumx[i] <- FUN(1 - (x[(i-h+1):i] >= z))
+      } 
+      
+      if (direction == ">") {
+        cumx[i] <- FUN(1 - (x[(i-h+1):i] > z))
+      }
+      
+      if (direction == "<=") {
+        cumx[i] <- FUN(1 - (x[(i-h+1):i] <= z))
+      }
+      
+      if (direction == "<") {
+        cumx[i] <- FUN(1 - (x[(i-h+1):i] < z))
+      }
+    }
+  }
+  return(cumx)
+}
+
+
+# kernel functions
+Wt_IDW <- function(theta, dist_mat) 1/dist_mat^theta
+Wt_IDW_gauss <- function(theta, dist_mat) exp(-dist_mat^2/theta)
+
+# Leave-One-Out Cross-Validation
+LOOCV_score <- function(Wt_fun, theta, dist_mat, Z) { 
+  Wtilde <- Wt_fun(theta = theta, dist_mat = dist_mat)
+  CV <- 0
+  # Zi <- c()
+  for(i in 1:length(Z)) {
+    Wtilde2 <- Wtilde[i,-i]
+    W2 <- Wtilde2 / sum(Wtilde2) 
+    z_pred <- W2 %*% Z[-i] 
+    # Zi[i] <- z_pred
+    CV[i] <- (z_pred - Z[i])^2
+  }
+  
+  mean(CV, na.rm = TRUE)
+}
+
+best_tune <- function(theta_vect, FUN, df, x, y){
+  # eliminate non-varying columns
+  
+  df_minmaxed <- df %>% ungroup() %>% filter_(paste0("!is.na(", y,")")) %>% 
+    dplyr::select(all_of(x)) %>% 
+    sapply(min_max) %>% data.frame()
+  
+  d <- rdist(df_minmaxed, df_minmaxed)
+  
+  a <- sapply(theta_vect, function(theta) {
+    LOOCV_score(Wt_fun = FUN, 
+                theta = theta, 
+                dist_mat = d, 
+                Z = df %>% filter_(paste0("!is.na(", y,")")) %>% .[[y]])
+  })
+  
+  list(
+    dist_mat = d,
+    theta_vect = theta_vect,
+    RMSE = sqrt(a),
+    best_tune = theta_vect[which.min(a)]
+  )
+}
+
+
+LOOCV_GAM <- function(f, df, Z, family = poisson(), method = "REML", trControl = NULL){
+  CV <- lapply(1:length(Z), function(i){
+    # cat("Iteration", i, "\n")
+    m <- mgcv::gam(f, df[-i,], method = method, family = family, trControl = trControl)
+    z_pred <- exp(predict(m, df)[i])
+    (z_pred - Z[i])^2
+  })
+  mean(unlist(CV))
+}
+
+# LOOCV_USTK <- function(f, df, Z){
+#   CV <- lapply(1:length(Z), function(i){
+#     # cat("Iteration", i, "\n")
+#     m <- mgcv::gam(f, df[-i,], method = method, family = family, trControl = trControl)
+#     z_pred <- exp(predict(m, df)[i])
+#     (z_pred - Z[i])^2
+#   })
+#   mean(unlist(CV))
+# }
+
+
+myt_contour_lonlat <- st_transform(myt_map_commune, "+proj=longlat +ellps=WGS84 +datum=WGS84") %>% st_union()
+
+
+get_grid <- function(m, length = 50){
+  coords <- st_coordinates(st_geometry(m))
+  coord_lim <- get_coord_limits(x = coords[, "X"], y = coords[, "Y"])
+  
+  myt_grid <- expand.grid(Longitude = seq(coord_lim$lon[1], coord_lim$lon[2], length = length), 
+                          Latitude = seq(coord_lim$lat[1], coord_lim$lat[2], length = length))
+  
+  expanded_grid <- myt_grid
+  myt_grid_sf <- st_as_sf(myt_grid, coords = c("Longitude", "Latitude"), crs = "EPSG:4471")
+  
+  # myt_grid_sf <- st_transform(myt_grid_sf, "+proj=longlat +ellps=WGS84 +datum=WGS84")
+  myt_grid_sf <- st_transform(myt_grid_sf, crs = st_crs(m))
+  intersections <- st_intersects(myt_grid_sf$geometry, m)
+  
+  myt_grid_sf$commune <- m$commune[as.integer(intersections)]
+  expanded_grid$commune <- m$commune[as.integer(intersections)]
+  
+  myt_grid_sf <- bind_cols(myt_grid_sf, st_coordinates(myt_grid_sf))
+  
+  list(grid_sf = myt_grid_sf,
+       grid = expanded_grid %>% rename(X = "Longitude", Y = "Latitude"))
+}
+
+
+idw.predict <- function(df, x, y, FUN, theta = 5){
+  Y <- df %>% ungroup() %>% dplyr::select(all_of(x)) %>% 
+    sapply(min_max) %>% data.frame() %>% 
+    mutate_(paste0("y = df[y]"))
+  
+  Y_train <- Y %>% filter_(paste0("!is.na(", y,")"))
+  
+  # distance
+  d <- rdist(Y[x], Y_train[x])
+  N <- nrow(d)
+  
+  # adjustment
+  d <- (d*(N-1) + 1/20)/N
+  
+  # weight calculation
+  Wtilde <- FUN(theta = theta, dist_mat = d)
+  W <- Wtilde/rowSums(Wtilde)
+  
+  # predictions
+  preds <- as.numeric(W %*% as.numeric(as.matrix(Y_train[,y])))
+  preds
+}
+
+
+# climate_week_waste <- read_excel("./1. Egg_Resuls/CleanedData/climate_week_waste2.xlsx") %>% 
+#   dplyr::select(-X, -Y)
+
+get_predictions <- function(year, theta, df, map_grid, x, y, FUN, midpoint = NULL, climatedata, count_max = NULL){
+  # climate_week_waste <- climate_week %>% 
+  #   left_join(total_waste_week, by = c("NAME"="commune", "Year", "Week")) %>% 
+  #   fill(waste_number, .direction = "down") %>% 
+  #   filter(Year %in% year) %>% suppressWarnings()
+  wks <- unique(df$Week)
+  
+  if ("X" %in% names(climatedata)) climatedata$X = NULL
+  if ("Y" %in% names(climatedata)) climatedata$Y = NULL
+  
+  climatedata$Week <- week(climatedata$DATE)
+  climatedata <- climatedata %>% filter(Year == year, Week %in% wks)
+  
+  myt_grid_sf0 <- map_grid$grid_sf %>% filter(!is.na(commune)) %>% 
+    left_join(climatedata %>% filter(Year == year), by = c("commune" = "NAME")) %>% 
+    dplyr::select(commune, all_of(x), X, Y) %>% suppressWarnings()
+  
+  expanded_grid0 <- map_grid$grid %>% filter(!is.na(commune)) %>% 
+    left_join(climatedata %>% filter(Year == year), by = c("commune" = "NAME")) %>% 
+    dplyr::select(commune, all_of(x), X, Y) %>% suppressWarnings()
+  
+  expanded_grid0 <- dplyr::select(expanded_grid0, all_of(x)) %>% sapply(min_max) %>% data.frame()
+  pred_grid_idw <- dplyr::select(df, all_of(x)) %>% sapply(min_max) %>% data.frame()
+  
+  pred_obs_dist_mat <- rdist(expanded_grid0, pred_grid_idw)
+  
+  N <- nrow(pred_obs_dist_mat)
+  pred_obs_dist_mat <- (pred_obs_dist_mat*(N-1) + 1/20)/N
+  
+  Wtilde <- FUN(theta = theta, dist_mat = pred_obs_dist_mat)
+  rm(pred_obs_dist_mat)
+  W <- Wtilde/rowSums(Wtilde)
+  
+  myt_grid_sf0$Pred <- as.numeric(W %*% df[[y]])
+  expanded_grid0$commune <- myt_grid_sf0$commune
+  expanded_grid0$Pred <- myt_grid_sf0$Pred
+  expanded_grid0$X <- myt_grid_sf0$X
+  expanded_grid0$Y <- myt_grid_sf0$Y
+  expanded_grid0$Week <- myt_grid_sf0$Week
+  # myt_grid_sf0$Ratio <- myt_grid_sf0$Pred/max(myt_grid_sf0$Pred)
+  
+  the_plot <- expanded_grid0 %>% 
+    group_by(X, Y, Week) %>% 
+    summarise(Avg_Num_eggs = mean(Pred), .groups = "drop") %>% ungroup() %>% 
+    mutate(Ratio = Avg_Num_eggs/max(count_max))
+    
+  
+  the_plot <- st_as_sf(the_plot, coords = c("X", "Y"), crs = "EPSG:4471")
+  # the_plot <- st_transform(the_plot, "+proj=longlat +ellps=WGS84 +datum=WGS84")
+  # 
+  # the_plot <- st_as_sf(the_plot, coords = c("X", "Y"),
+  #                           crs= "+proj=longlat +datum=WGS84 +ellps=WGS84 +towgs84=0,0,0")
+  
+  the_plot <- st_transform(the_plot, crs = st_crs(myt_map_commune))
+  the_plot <- bind_cols(the_plot, st_coordinates(the_plot))
+  
+  
+  the_plot0 <- the_plot %>% 
+    ggplot() + geom_tile(aes(X, Y, fill = Ratio)) +
+      scale_fill_gradient2(low = "green", mid = "darkorange", high = "red", midpoint = 0.5) + #mean(the_plot$Ratio)
+      geom_sf(data = myt_contour_lonlat, fill = "transparent", size = 0.1) +
+      theme_map() + facet_wrap(~Week)
+
+  the_plot0$labels$fill <- paste0(the_plot0$labels$fill, "\n", year)
+  
+  list(
+    GridPred = myt_grid_sf0, 
+    Plot = the_plot0
+  )
+}
+
+# other version of the get_prediction function adapted for adult mosquito data
+get_predictions2 <- function(year = 2018, theta = 5, FUN = Wt_IDW){
+  myt_grid_sf0 <- myt_grid_sf %>%
+    left_join(adult_mosquito_week %>% filter(Year == year) %>% dplyr::select(-X, -Y),
+              by = "commune") 
+  
+  expanded_grid0 <- expanded_grid %>%
+    left_join(adult_mosquito_week %>% filter(Year == year) %>% dplyr::select(-X, -Y),
+              by = "commune") 
+  
+  myt_grid_sf0 <- bind_cols(myt_grid_sf0, st_coordinates(myt_grid_sf0))
+  
+  expanded_grid0 <- expanded_grid0 %>% rename(X = Longitude, Y = Latitude) %>% 
+    dplyr::select(-Year, -d, -com, -commune, -Num_adult) %>% 
+    sapply(min_max) %>% data.frame()
+  
+  pred_grid_idw <- adult_mosquito_week %>% filter(Year == year) %>%
+    dplyr::select(-Year, -Num_adult, -d, -com, -commune) %>% 
+    sapply(min_max) %>% data.frame() %>% 
+    dplyr::select(names(expanded_grid0))
+  
+  pred_obs_dist_mat <- rdist(expanded_grid0, pred_grid_idw)
+  
+  N <- nrow(pred_obs_dist_mat)
+  pred_obs_dist_mat <- (pred_obs_dist_mat*(N-1) + 1/20)/N
+  
+  Wt_IDW <- function(theta, dist_mat) 1/dist_mat^theta
+  Wtilde <- FUN(theta = theta, dist_mat = pred_obs_dist_mat)
+  
+  Wtilde_rsums <- rowSums(Wtilde)
+  W <- Wtilde/Wtilde_rsums
+  
+  myt_grid_sf0$Num_adult_pred <- as.numeric(W %*% adult_mosquito_week$Num_adult[adult_mosquito_week$Year==year])
+  myt_grid_sf0$Ratio_adult=myt_grid_sf0$Num_adult_pred/max(myt_grid_sf0$Num_adult_pred)
+  
+  the_plot <- myt_grid_sf0 %>% ggplot() + geom_tile(aes(X, Y, fill = Ratio_adult)) + 
+    scale_fill_gradient2(low = "green", mid = "darkorange", high = "red", 
+                         midpoint = max(myt_grid_sf0$Ratio_adult)/2) + 
+    geom_sf(data = myt_contour_lonlat, fill = "transparent", size = 0.1) +
+    theme_map() + facet_wrap(~Week)
+  the_plot$labels$fill <- paste0("Predicted\nAdult ", year)
+  
+  list(
+    GridPred = myt_grid_sf0,
+    Plot = the_plot
+  )
+}
+
+# function that does the Winsorization
+correct_outliers <- function(x, method = "winsorization"){
+  outliers <- boxplot(x, plot = FALSE)$out
+  if (method == "winsorization"){
+    x[x %in% outliers] <- sp_func(x[!x %in% outliers], fun = max)
+  }
+  x
+}
+
+
+
+# determine the growth (change in time)
+growth <- function(x, percent = TRUE) {
+  p <- ifelse(percent, 100, 1)
+  p*(x - lag(x))/x
+}
+
+
+box_cox_transform <- function(x, lambda){
+  if(lambda == 0){
+    trans <- log(x)
+  } else {
+    trans <- (x^lambda-1)/lambda
+  }
+  trans
+}
+
+
+daterange <- function(start_date, end_date, by = "day"){
+  date1 <- as.Date(start_date)
+  date2 <- as.Date(end_date)
+  y1 <- year(date1)
+  y2 <- year(date2)
+  
+  df <- data.frame(
+    Date = seq.Date(as.Date(paste0(y1, "-01-01")),
+                    as.Date(paste0(y2, "-12-21")), by = "day")) %>% 
+      mutate(Year = year(Date) %>% as.factor(),
+             Week = week(Date)
+  )
+  df
+}
+
+
+# function that will add missing dates
+get_daily_data <- function(observed_df, add = NULL){
+  add %>% 
+    lapply(function(commune){
+      observed_df$commune <- commune
+      observed_df
+    }) %>% bind_rows()
+}
+
+get_ratio <- function(x, method = 1, threshold = NULL){
+  n <- length(x)
+  
+  if (is.null(threshold)) threshold = max(x)
+  
+  if (n <= 1) {
+      stop("x should be of length greater than 1!")
+    } else {
+    return(ifelse(x <= threshold, (x-min(x))/(threshold-min(x)), 1))
+  }
+}
+```
+
+
+A per the last meeting, we should extract data for the Koungou commune and make the analyse before extrapolating it to the other communes.
+
+```{r}
+adultdata00 <- read_excel("./2. Adult_results/CleanedData/capture_adult.xlsx") %>% 
+  mutate(Week = week(Installation_date)) %>% filter(Year > 2017)
+df <- adultdata00
+adultdata00 %>% 
+  ggplot(aes(Longitude, Latitude)) + geom_point()
+```
+
+
+#Difficulté 1: coordonnees aberrantes
+
+
+```{r}
+adultdata00_sf <- st_as_sf(df, coords = c("Longitude", "Latitude"),
+                       crs= "+proj=longlat +datum=WGS84 +ellps=WGS84 +towgs84=0,0,0")
+
+adultdata00_sf <- st_transform(adultdata00_sf, crs = st_crs(myt_map))
+adultdata00_sf <- bind_cols(adultdata00_sf, st_coordinates(st_centroid(adultdata00_sf$geometry)))
+
+
+intersections <- st_intersects(adultdata00_sf$geometry, myt_map)
+adultdata00_sf$Village_intersect <- myt_map$village[as.integer(intersections)]
+adultdata00$Village_intersect <- myt_map$village[as.integer(intersections)]
+
+id_out <- which(is.na(adultdata00$Village_intersect))
+villages <- unique(adultdata00$Village[id_out])
+
+# adultdata00$Village_intersect[id_out]
+# adultdata00$Latitude[id_out]
+# adultdata00$Longitude[id_out]
+
+# for (i in 1:4){
+#   cat("i =", i, "\n")
+#   x <- adultdata00$Latitude[adultdata00$Village == villages[[i]] & is.na(adultdata00$Village_intersect)]
+#   y <- mean(adultdata00$Latitude[adultdata00$Village == villages[[i]] & !is.na(adultdata00$Village_intersect)])
+#   
+#   # id of the far off point
+#   
+#   
+#   xx <- adultdata00$Longitude[adultdata00$Village == villages[[i]] & is.na(adultdata00$Village_intersect)]
+#   yy <- mean(adultdata00$Longitude[adultdata00$Village == villages[[i]] & !is.na(adultdata00$Village_intersect)])
+#   
+#   if(max(abs(x-y)) < 0.01){
+#     next
+#   } else {
+#     adultdata00$Latitude[adultdata00$Village == villages[[i]] & is.na(adultdata00$Village_intersect)] <- y
+#   }
+#   
+#   if(max(abs(xx-yy)) < 0.01){
+#     next
+#   } else {
+#     adultdata00$Longitude[adultdata00$Village == villages[[i]] & is.na(adultdata00$Village_intersect)] <- yy
+#   }
+# }
+# 
+# adultdata00 %>% 
+#   ggplot(aes(Longitude, Latitude, col = (!is.na(Village_intersect)))) + geom_point()
+```
+
+
+```{r}
+calibrate_cordinates <- function(df, max_lon = 45.3, max_lat = -12.6, col = "Village", index_out){
+  # list of communes names that are out of the range
+  
+  
+  vil_names_lon <- df %>% 
+    filter(Longitude >= max_lon) %>% 
+    dplyr::select(all_of(col)) %>% as.matrix() %>% as.character() %>% unique()
+    
+  vil_names_lat <- df %>% 
+    filter(Latitude >= max_lat) %>% 
+    dplyr::select(all_of(col)) %>% as.matrix() %>% as.character() %>% unique()
+    
+  for (i in 1:length(vil_names_lon)){
+    # coordinates that are in the range from the same village
+    avg_coord <- mean(df$Longitude[df$Longitude < max_lon & df[[col]] == vil_names_lon[[i]]], na.rm = TRUE)
+    df$Longitude[df$Longitude >= max_lon & df[[col]] == vil_names_lon[[i]]] <- avg_coord
+  }
+    
+  for (i in 1:length(vil_names_lat)){# coordinates that are in the range from the same village
+    avg_coord <- mean(df$Latitude[df$Latitude < max_lat & df[[col]] == vil_names_lat[[i]]], na.rm = TRUE)
+    df$Latitude[df$Latitude >= max_lat & df[[col]] == vil_names_lat[[i]]] <- avg_coord
+  }
+  
+  df
+}
+
+adultdata00 <- calibrate_cordinates(adultdata00)
+
+adultdata00 %>% 
+  ggplot(aes(Longitude, Latitude, col = (!is.na(Village_intersect)))) + geom_point()
+```
+
+
+
+### Adult mosquito daily data as we did with egg data
+```{r}
+# adult mosquito data
+with_village = FALSE
+
+if (with_village){
+  adultdata0 <- adultdata00 %>% 
+    filter(Year > 2017) %>% 
+    group_by(Year, Date = Collection_date, commune = Commune, village = Village, Longitude, Latitude) %>% 
+    summarise(Num_adults = sp_func(Nb, mean), .groups = "drop") %>% 
+    mutate(Week = week(Date), Year = as.factor(Year))
+} else {
+  adultdata0 <- adultdata00 %>% 
+    filter(Year > 2017) %>% 
+    group_by(Year, Date = Collection_date, commune = Commune) %>% 
+    summarise(Num_adults = sp_func(Nb, mean), .groups = "drop") %>% 
+    mutate(Week = week(Date), Year = as.factor(Year))
+}
+  
+  
+head(adultdata0)
+# all communes
+all_communes <- myt_map$commune %>% unique()
+# date range to get daily data
+date_range <- daterange(start_date = min(adultdata0$Date), end_date = max(adultdata0$Date))
+head(date_range)
+# adding commune to data_range
+date_com <- get_daily_data(date_range, all_communes)
+```
+
+
+```{r}
+adultdata00_sf <- st_as_sf(adultdata00, coords = c("Longitude", "Latitude"),
+                       crs= "+proj=longlat +datum=WGS84 +ellps=WGS84 +towgs84=0,0,0")
+
+adultdata00_sf <- st_transform(adultdata00_sf, crs = st_crs(myt_map))
+adultdata00_sf <- bind_cols(adultdata00_sf, st_coordinates(st_centroid(adultdata00_sf$geometry)))
+
+myt_map_commune %>% 
+  ggplot() + geom_sf() + 
+  geom_point(data = adultdata00_sf %>% mutate(Outlier = !is.na(Village_intersect)), 
+             aes(X, Y, col = Outlier)) + theme_map()
+```
+
+* Adding the weight variable
+```{r}
+weight <- adultdata00 %>% 
+  group_by(Year, Commune, Village, Week) %>% 
+  summarise(weight = 100*sum(!is.na(Nb))/nrow(adultdata00), .groups = "drop")
+
+adultdata00 <- adultdata00 %>% left_join(weight, by = c("Year", "Commune", "Village", "Week"))
+```
+
+
+
+```{r}
+myt_map_commune %>% filter(commune == "Koungou") %>% ggplot() + geom_sf() + 
+  geom_point(data = adultdata00_sf %>% filter(Commune == "KOUNGOU", Year == 2018),
+             aes(X, Y, col = Nb)) + #, col = (!is.na(Num_eggs)) %>% factor()
+  scale_color_gradient2(low = "green", mid = "yellow", high = "red") + 
+  facet_wrap(~Week) + theme_minimal()
+```
+
+
+### The table of climate data with all the constructed columns (bycom)
+```{r}
+bycom <- read_excel("./1. egg_Resuls/CleanedData/bycom.xlsx") %>% 
+  mutate(Year = factor(Year)) %>% 
+  dplyr::select(-contains("_Q"))
+head(bycom)
+```
+
+### Merging data
+```{r}
+adultdata <- adultdata0 %>% 
+  full_join(date_com, by = c("Date", "commune", "Year", "Week")) %>% 
+  arrange(commune) %>% 
+  left_join(bycom, by = c("commune" = "NAME", "Date" = "DATE", "Year"))
+
+head(adultdata)
+
+# adultdata_sf <- st_as_sf(adultdata, coords = c("Longitude", "Latitude"),
+#                        crs= "+proj=longlat +datum=WGS84 +ellps=WGS84 +towgs84=0,0,0")
+# 
+# adultdata_sf <- st_transform(adultdata_sf, crs = st_crs(myt_map))
+# adultdata_sf <- bind_cols(adultdata_sf, st_coordinates(st_centroid(adultdata00_sf$geometry)))
+
+# adding number of eggs as a covariable
+# la table des dechets
+waste_data <- read_excel("./1. Egg_Resuls/CleanedData/cleaned_eggData_with_climatedf_wastedf.xlsx") %>% dplyr::mutate(Year = as.factor(Year))
+
+eggdata <- read_excel("./1. Egg_Resuls/CleanedData/eggdata_updated.xlsx") %>% 
+  mutate(Date = as.Date(Date)) %>% # soustraire
+  dplyr::select(Year, Date, commune, Week, Num_eggs = Num_eggs_IDW) %>% 
+  mutate(Year = factor(Year), Week = week(Date))
+
+adultdata1 <- adultdata %>% 
+  mutate(Date = as.Date(Date)) %>% #left_join(waste_data, by = c("Year", "Date", "commune", "Week")) %>%  # %>% left_join(eggdata, by = c("Year", "Date", "commune", "Week")) %>% 
+  filter(!is.na(RR))
+
+dim(adultdata)
+dim(adultdata1) # difference due au filter(!is.na(RR))
+```
+
+### Ajout de la variable poids
+```{r}
+# weight <- adultdata1 %>% 
+#   group_by(Year, commune, Week) %>% 
+#   summarise(weight = sum(!is.na(Num_adults), na.rm = TRUE)/n(), .groups = "drop") %>% 
+#   filter(commune == "KOUNGOU", Year %in% 2019:2021)
+# 
+# adultdata1 <- adultdata1 %>% left_join(weight, by = c("Year", "commune", "Week"))
+```
+
+
+## distribution du nombre de moustique par an
+```{r}
+adultdata1 %>% filter(!is.na(Num_adults)) %>% 
+  ggplot(aes(commune, Num_adults, col = commune)) + geom_boxplot() + 
+  facet_wrap(~Year, scales = "free_x", nrow = 1) + theme_minimal() +
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1))
+
+ggsave("./2. Adult_results/boxplots.png")
+```
+
+
+## Distribution de donnees par commune et par semaine et annee
+```{r}
+p <- adultdata1 %>% 
+  filter(Year %in% 2018:2021) %>% 
+  group_by(Year, commune, Week) %>% 
+  # Number of observations per week
+  summarise(obs_num = sum(!is.na(Num_adults)), .groups = "drop") %>% #filter(commune == "KOUNGOU") %>% 
+  ggplot(aes(as.factor(Week), obs_num, fill = commune)) + geom_col() + 
+  xlab("Week") + ylab("Week observation frequency") + 
+  facet_wrap(~Year, scales = "free", ncol = 1) +
+  theme_minimal()
+
+plotly::ggplotly(p)
+
+# frequency table
+the_table <- adultdata1 %>% 
+  filter(Year %in% 2018:2021, !is.na(Num_adults)) %>% count(Year, commune, Week) %>% 
+  spread(key = Year, value = n) %>% 
+  flextable() %>% autofit() %>% theme_box() %>% merge_v(j = 1)
+
+the_table %>% 
+  save_as_docx(path = "./2. Adult_results/weely_frequency_tables.docx")
+print(the_table)
+
+
+# number of weeks where data were collected in a given commune
+# frequency table
+week_num <- adultdata1 %>% 
+  filter(Year %in% 2018:2021, !is.na(Num_adults)) %>% count(Year, commune) %>%
+  spread(key = Year, value = n) %>% 
+  flextable() %>% autofit() %>% theme_box() %>% merge_v(j = 1)
+
+week_num %>% 
+  save_as_docx(path = "./2. Adult_results/number_of_weeks_by_year_commune.docx")
+print(week_num)
+
+
+# les communes representees par ans
+communes_year <- adultdata1 %>%
+  filter(Year %in% 2018:2021, !is.na(Num_adults)) %>% group_by(Year) %>% 
+  summarise(communes = paste0(sort(unique(commune)), collapse = " - "), 
+            `Count` = length(unique(commune)), `% obs.` = n()) %>% 
+  mutate(`% obs.` = round(100*`% obs.`/sum(`% obs.`), 2)) %>%
+  flextable() %>% autofit() %>% width(j=2, width = 3) %>% theme_box()
+
+communes_year %>% 
+  save_as_docx(path = "./2. Adult_results/number_of_communes_by_year.docx")
+print(communes_year)
+
+
+# table for Koungou
+adultdata1 %>% filter(commune == "KOUNGOU", !is.na(Num_adults)) %>%  
+  group_by(commune, Year) %>% 
+  summarise(Nb_week  = length(unique(Week)), nb_obs = n(),
+            .groups = "drop") %>% 
+  flextable() %>% autofit() %>% theme_box() %>% merge_v(j = 1)
+```
+
+
+
+
+## Model pour toutes les communes de 2018-2019 et 2021
+```{r}
+years <- c(2018, 2019, 2021)
+id_train <- adultdata1$Year %in% years & !is.na(adultdata1$Num_adults)
+numadult <- adultdata1 %>% dplyr::select(Num_adults)
+
+adultdata1_minmaxed <- adultdata1 %>%
+  mutate(Year = as.numeric(as.character(Year))) %>%
+  mutate_if(is.numeric, list(min_max)) %>% 
+  dplyr::select(-Rained, -Date, -Date.y) %>% 
+  mutate(Num_adults = ceiling(numadult$Num_adults))
+
+data_allcom <- adultdata1_minmaxed[id_train,]
+
+
+# model lasso
+trainControl <- trainControl(method = "cv", number = 5)
+lasso_reg <- train(Num_adults ~. -commune -Year, data = data_allcom,
+                   method = "glmnet", family = poisson(), trControl = trainControl)
+lasso_reg
+
+v_imp <- varImp(lasso_reg)
+plot(v_imp)
+
+VIMP <- v_imp$importance %>% #filter(Overall > 1) %>% 
+  arrange(desc(Overall)) %>% 
+  rownames_to_column("Variable") %>% 
+  mutate(Overall = round(Overall, 2))
+
+VIMP %>% flextable() %>% 
+  autofit() %>% theme_box()
+
+
+write.xlsx(VIMP, "./1. egg_Resuls/VIM.xlsx")
+
+VIMP %>% 
+  filter(Overall > 0) %>% 
+  ggplot(aes(reorder(Variable, Overall), Overall)) + geom_col() + 
+  theme_minimal() + xlab("Variable") + 
+  theme(axis.text.x = element_text(angle = 80, vjust = 0.5)) 
+ggsave("./2. Adult_results/variable_importance.png")
+ggsave("./2. Adult_results/variable_importance.pdf")
+
+
+data_allcom$fitted <- fitted(lasso_reg)
+data_allcom %>% 
+  ggplot(aes(Num_adults, fitted, col = commune)) + geom_point() + 
+  xlab("observed") + theme_minimal() + 
+  ggtitle("Fitted vs observed", subtitle = "for all commune")
+ggsave("./2. Adult_results/observed_vs_fitted_lasso.png")
+ggsave("./2. Adult_results/observed_vs_fitted_lasso.pdf")
+
+variables <- VIMP$Variable[VIMP$Overall > 0]
+
+formule <- Num_adults ~RRcum_5 + MRR35 + MNDwtRR_14 + TN + MNDwRR_28 + Week + MNDwRR_21 + MNDwRR_6 + MTX_35 + MRR5 + MNDwtRR_35 + MTX_3 + MNDwRR_2 + MNDwtRR_2
+lasso_vimp <- train(formule, data = data_allcom,
+                   method = "glmnet", family = poisson(), trControl = trainControl)
+
+lasso_vimp
+
+v_imp <- varImp(lasso_vimp)
+plot(v_imp)
+
+VIMP <- v_imp$importance %>% #filter(Overall > 1) %>% 
+  arrange(desc(Overall)) %>% 
+  rownames_to_column("Variable") %>% 
+  mutate(Overall = round(Overall, 2))
+
+VIMP %>% flextable() %>% 
+  autofit() %>% theme_box()
+
+
+VIMP %>% 
+  filter(Overall > 0) %>% 
+  ggplot(aes(reorder(Variable, Overall), Overall)) + geom_col() + 
+  theme_minimal() + xlab("Variable") + 
+  theme(axis.text.x = element_text(angle = 80, vjust = 0.5)) 
+# paste0(paste0("Num_adults ~"), paste0(variables, collapse = " + "))
+variables2 <- VIMP$Variable[VIMP$Overall > 0]
+paste0(paste0("Num_adults ~"), paste0("s(", c(variables2, "Year"), ")", collapse = " + "))
+```
+##Correlation test (Person) on rejette le caractère linéaire
+
+```{r}
+#View(data_allcom)
+outcome=data_allcom$Num_adults
+cor(outcome, data_allcom$Y)
+```
+
+```{r}
+variables2
+```
+
+
+Random forest model
+```{r}
+# # random forests
+# rf_reg <- train(formule, data = data_allcom,
+#                    method = "xgbTree", trControl = trainControl)
+# rf_reg
+# 
+# # variable importance
+# varImp(rf_reg) %>% plot()
+```
+
+## Modele GAM pour toutes les communes sur 2018, 2019 et 2021
+#nb() pour negative binomial
+#poisson() pour Poisson 
+```{r}
+k = 10
+# + s(MTX_35, k = k) + s(RRcum_5, k = k)
+fmla <- Num_adults ~ s(MTX_35, Week, k = k) + s(RRcum_5, Week, k = k) + s(MNDwRR_6, k = 6) + MRR35 + s(MTX_3, k = k) + s(MNDwtRR_14, k = k) + s(MNDwRR_28, k = 10) + s(MNDwRR_21, k = k) + TN + s(MRR5, k = k) + s(MNDwtRR_35, k = k) + s(MNDwRR_2, k=3) #+ waste_number
+
+fmla2 <- Num_adults ~ s(MTX_35, MRR35, k = k) + s(RRcum_5, Week, k = k) + s(MNDwRR_6, k = 6) + s(MTX_3, k = k) + s(MNDwtRR_14, k = k) + s(MNDwRR_28, k = 10) + s(MNDwRR_21, k = k) + TN + s(MRR5, k = k) + s(MNDwtRR_35, k = k) + s(MNDwRR_2, k=3) + s(Year, bs = "re")
+
+# fmla2 <- Num_adults ~ s(MTX_35, MRR35, k = k) + s(MTX_35, Week, k = k) + s(RRcum_5, Week, k = k) + s(MNDwRR_6, k = 6) + s(MNDwtRR_14, k = k) + s(MNDwRR_28, k = 10) + s(MNDwRR_21, k = k) + TN
+
+# fmla_sp <- Num_adults ~s(RRcum_5) + s(MTX_35) + s(MTX_3) + MRR35 + TN + s(MNDwRR_28) + s(MNDwtRR_14) + s(MNDwRR_21) + s(MRR5) + s(MNDwtRR_35) + s(Week) + s(MNDwRR_2) + Year
+
+gam_toutes <- mgcv::gam(fmla, data = data_allcom, family = poisson(), method = "REML", select = TRUE)
+gam_toutes2 <- mgcv::gam(fmla2, data = data_allcom, family =poisson(), method = "REML")
+summary(gam_toutes)
+summary(gam_toutes2)
+coef(gam_toutes)
+
+lapply(data_allcom[variables2], function(x) length(unique(x))) %>% unlist()
+
+# cor_pmat(data_allcom[variables2]) %>% mutate_if(is.numeric, list(function(x) round(x, 3)))
+anova(gam_toutes, gam_toutes2, test = "Chisq")
+
+AIC(gam_toutes)
+AIC(gam_toutes2)
+```
+
+# Visualisation des liens entre variablesOn garde le modele sans l'annee en aleatoire.
+
+```{r}
+plot(gam_toutes)
+
+par(mfrow = c(2,2))
+mgcv::gam.check(gam_toutes)
+```
+
+## Imputation de donnees
+##0.07 % de valeurs abérantes détectés (plus grand que 50) et 0.02 % plus grand que 100
+```{r}
+adultdata1$fitted <- exp(predict(gam_toutes, adultdata1_minmaxed %>% 
+                                   filter(!is.na(RR)) %>% 
+                                   mutate(Year = as.numeric(as.character(Year))) %>% 
+                                   mutate_if(is.numeric, list(min_max))))
+
+# View(adultdata1 %>% filter(is.na(fitted)))
+summary(adultdata1$fitted)
+boxplot(adultdata1$fitted)
+boxplot(adultdata1$fitted[adultdata1$fitted <= 60])
+mean(adultdata1$fitted > 60, na.rm = T)
+
+id_outliers <- adultdata1$fitted >= 60
+sum(id_outliers)
+prop.table(id_outliers %>% table)
+
+id_outliers2 <- adultdata1$fitted >100
+sum(id_outliers2)
+prop.table(id_outliers2 %>% table)
+
+adultdata1 %>% filter(fitted <= 60) %>% 
+  ggplot(aes(commune, fitted, col = commune)) + geom_boxplot() + 
+  xlab("observed") + theme_minimal() + 
+  ggtitle("Fitted values", subtitle = "for all commune") + 
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1)) + 
+  facet_wrap(~Year, scales = "free")
+
+adultdata1 %>% filter(commune %in% c("BANDRELE", "MTSAMBORO")) %>% filter(Year!=2022)%>%
+  # group_by(Year, Week, commune) %>% summarise(fitted = mean(fitted), .groups = "drop") %>%
+  ggplot(aes(Date, fitted, col = commune)) + geom_line() + 
+  xlab("Week") + theme_minimal() + 
+  ggtitle("Fitted values", subtitle = "") + 
+  facet_wrap(~Year, scales = "free")
+
+# graphe sans DA
+adultdata1 %>% filter(commune %in% c("BANDRELE", "MTSAMBORO"), fitted <= 100) %>% 
+  # group_by(Year, Week, commune) %>% summarise(fitted = mean(fitted), .groups = "drop") %>%
+  ggplot(aes(Date, fitted, col = commune)) + geom_line() + 
+  xlab("observed") + theme_minimal() + 
+  ggtitle("Fitted vs observed", subtitle = "for all commune") + 
+  facet_wrap(~Year, scales = "free")
+
+adultdata1 %>% filter(commune %in% c("BANDRELE", "CHIRONGUI"), fitted <= 100) %>%
+  # group_by(Year, Week, commune) %>% summarise(fitted = mean(fitted), .groups = "drop") %>% 
+  ggplot(aes(Date, fitted, col = commune)) + geom_line() + 
+  xlab("observed") + theme_minimal() + 
+  ggtitle("Fitted vs observed", subtitle = "for all commune") + 
+  facet_wrap(~Year, scales = "free")
+
+## On groupe par semaine,commune et annee et moyenne
+p_all <- adultdata1 %>% #filter(commune %in% c("BANDRELE", "CHIRONGUI")) %>%
+  group_by(Year, Week, commune) %>% summarise(fitted = mean(fitted), .groups = "drop") %>% 
+  ggplot(aes(Week, fitted, col = commune)) + geom_line() + 
+  xlab("Week") + theme_minimal() + 
+  ggtitle("Fitted values", subtitle = "for all commune") + 
+  facet_wrap(~Year, scales = "free")
+
+plotly::ggplotly(p_all)
+
+adultdata1[c("Year", "Date", "commune", variables2)] %>% filter(commune %in% c("BANDRELE"), Year == 2022)
+
+coefs <- coefficients(gam_toutes)
+coefs[grepl("MRR", names(coefs))]
+```
+### Comportement de la moyenne et de la variance après dispersion
+
+### Comportement de la moyenne et de la variance après dispersion
+
+```{r}
+# Moyenne et ecart-type de nombre de contacts
+adultdata1%>% filter(fitted <= 60) %>% summarise_at("fitted", list(mean = function(x) mean(x, na.rm = TRUE), 
+                                               sd = function(x) sd(x, na.rm = TRUE)))
+
+```
+
+##" Courbes pour supersposer (par commune selectionner)
+
+```{r}
+adultdata1%>%filter(!is.na(Num_adults)) %>%filter(Year!=2022) %>%ggplot(aes(Week,Num_adults,col="observed")) + geom_line(aes(Week, fitted,col="fitted")) + geom_line()  + facet_wrap(~Year)
+```
+
+```{r}
+adultdata1 %>% filter(fitted < 100)%>%filter(!is.na(Num_adults)) %>%filter(Year!=2022) %>%ggplot(aes(Week,Num_adults,col="observed")) + geom_line(aes(Week, fitted,col="fitted")) + geom_line()  + facet_wrap(~Year)
+```
+
+  
+```{r}
+adultdata1 %>% filter(fitted < 100)%>%filter(!is.na(Num_adults)) %>%filter(commune == "MAMOUDZOU") %>%
+  ggplot() + geom_line(aes(Week, Num_adults), col = "red") +
+  geom_line(aes(Week, fitted), col = "blue")+
+xlab("Week") +
+  ylab("Fitted (red)  vs Observed (blue)")
+```
+
+
+
+## Calcul du ratio
+* Méthode 1: 
+
+$$R = \frac{d_n - d_{n-1}}{d_{max} - d_{min}}$$
+
+$$R_i = \frac{d_i - d_{min}}{\textrm{threshold} - d_{min}}I_{x\leq \textrm{threshold}} + I_{x\geq \textrm{threshold}}$$
+##Ratio=max
+```{r}
+get_ratio <- function(x, method = 1, threshold = NULL){
+  n <- length(x)
+  
+  if (is.null(threshold)) threshold = max(x)
+  
+  if (n <= 1) {
+      stop("x should be of length greater than 1!")
+    } else {
+    return(ifelse(x <= threshold, (x-min(x))/(threshold-min(x)), 1))
+  }
+}
+
+plot(get_ratio(1:10, threshold = NULL))
+```
+
+## Ratio avec seuil max
+```{r}
+adultdata1_ratio <- adultdata1 %>% #filter(fitted <= 60) %>% 
+  group_by(Year, Week, commune) %>% summarise(fitted = mean(fitted), .groups = "drop")
+
+
+reconstitution <- adultdata1_ratio %>% 
+  filter(Week %in% 1:52) %>% filter(Year != 2022) %>% filter(Year != 2020)%>% 
+  group_by(Year, commune, Week) %>% 
+  summarise(fitted = mean(fitted), .groups = "drop") %>% 
+  mutate(Ratio = get_ratio(fitted, threshold = 60)) %>% 
+  ggplot(aes(as.factor(Week), commune, fill = Ratio)) + geom_tile() + 
+  scale_fill_gradient2(low = "green", mid = "orange", high = "red", midpoint = 0.5) + 
+  facet_wrap(~Year, ncol = 2) + theme_minimal() + 
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.5)) 
+
+plotly::ggplotly(reconstitution)
+
+reconstitution4 <- adultdata1_ratio %>% 
+  filter(Week %in% 1:53) %>% filter(Year == 2020) %>% 
+  group_by(Year, commune, Week) %>% 
+  summarise(fitted = mean(fitted), .groups = "drop") %>% 
+  mutate(Ratio = get_ratio(fitted, threshold = 60)) %>% 
+  ggplot(aes(as.factor(Week), commune, fill = Ratio)) + geom_tile() + 
+  scale_fill_gradient2(low = "green", mid = "orange", high = "red", midpoint = 0.5) + 
+  facet_wrap(~Year, ncol = 2) + theme_minimal() + 
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.5)) 
+
+plotly::ggplotly(reconstitution4)
+```
+
+
+# Ratio different sans le seuil pas top Resultat ?? Identique?
+```{r}
+adultdata1_ratio <- adultdata1 %>% #filter(fitted <= 60) %>% 
+  group_by(Year, Week, commune) %>% summarise(fitted = mean(fitted), .groups = "drop")
+
+
+reconstitution <- adultdata1_ratio %>% filter(Year != 2022) %>% 
+  group_by(Year, commune, Week) %>% 
+  summarise(fitted = mean(fitted), .groups = "drop") %>% 
+  mutate(Ratio = get_ratio(fitted, threshold = max(fitted))) %>% 
+  ggplot(aes(as.factor(Week), commune, fill = Ratio)) + geom_tile() + 
+  scale_fill_gradient2(low = "green", mid = "orange", high = "red", midpoint = 0.5) + 
+  facet_wrap(~Year, ncol = 2) + theme_minimal() + 
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.5)) 
+
+plotly::ggplotly(reconstitution)
+```
+
+
+## Carte avec  seuill donc on enleve les valeurs abérantes
+```{r warning=FALSE, message=FALSE}
+adultdata2 <- myt_map_commune %>% select(commune) %>% left_join(adultdata1_ratio, by = "commune") %>% 
+  mutate(Ratio = get_ratio(fitted, threshold = 40))
+
+lapply(2018, function(year){
+  p <- adultdata2 %>% filter(Year == year) %>%filter(Week %in% 1:52) %>% ggplot() + geom_sf(aes(fill = Ratio)) + theme_map() + facet_wrap(~Week, nrow = 4) + 
+scale_fill_gradient2(low = "green", mid = "orange", high = "red", midpoint = 0.5)
+    p
+})
+```
+
+```{r}
+
+  p <- adultdata2 %>% filter(Year == 2018) %>%filter(Week %in% 1:52) %>% ggplot() + geom_sf(aes(fill = Ratio)) + theme_map(base_size = 9, base_family = "") + facet_wrap(~Week, nrow = 5, ncol= 11) + 
+scale_fill_gradient2(low = "green", mid = "orange", high = "red", midpoint = 0.5)
+    p
+```
+
+
+##Attention tm_layout au lieu de ttm
+```{r warning=FALSE, message=FALSE}
+library(tmap)
+lapply(2021, function(year){
+  tm_object <- tm_shape(adultdata2 %>% filter(Year == year)%>%filter(Week %in% 1:52)) +
+    tm_polygons(col = "Ratio", midpoint = 0.3, title = paste0("Ratio\n(", year, ")"), palette = "seq") +
+    tm_layout(aes.palette = list(seq = "-RdYlGn")) +
+    tm_facets(by = "Week")
+  tm_object
+})
+```
+
+
+## Méthode 2: Si le nombre dépasse un certain seuil, on affecte la valeur 1 au ratio sinon le diviser par le seuil
+
+$$R_i = \begin{cases}(x_i-\min(x))/s & \text{if}\; x_i \leq s\\1 & \text{else}\end{cases} = 1+\left(\frac{x_i}{s - \min(x)}-1\right)I_{\{x_i\leq s\}}.$$
+
+Where $s$ is the threshold (Ex: s = 63 mosquitoes) and fitted is the predicted number of mosquitoes in the commune at a given week or day.
+
+```{r}
+adultdata1[c("commune", "Date", "Year", "Num_adults", "fitted", variables2)] %>% 
+  filter(commune %in% c("BANDRELE"), Week %in% 10:20, Year == 2019, fitted > 50)
+```
+### résumé des variables explicatives
+
+```{r}
+summary_out <- adultdata1[id_outliers, variables] %>% 
+  lapply(summary) %>% bind_rows() %>% 
+  mutate(Variable = variables, .before = "Min.")
+
+summary_in <- adultdata1[!id_outliers, variables] %>% 
+  lapply(summary) %>% bind_rows() %>% 
+  mutate(Variable = variables, .before = "Min.")
+
+summary_out %>% flextable() %>% autofit() %>% theme_box()
+summary_in %>% flextable() %>% autofit() %>% theme_box()
+```
+
+-----------------FIN----------
+
+## Logistic GAM (je n'y crois pas mais cela fonctionne)
+```{r}
+# df_logistic <- adultdata1 %>% 
+#   mutate(Num_adults = ifelse(Num_adults >= 10, 1, 0) %>% factor())
+# 
+# 
+# # logistic GAM
+# logistic_GAM <- mgcv::gam(fmla, data = df_logistic %>% 
+#                             filter(!is.na(Num_adults)), 
+#                           method = "REML", family = binomial(), select = TRUE)
+# 
+# summary(logistic_GAM)
+# # coef(logistic_GAM)
+# 
+# 
+# df_logistic$Ratio <- predict.gam(logistic_GAM, df_logistic, type = "response")
+# df_logistic$Ratio. <- ifelse(df_logistic$Ratio >= 0.5, 1, 0) %>% as.numeric() 
+# 
+# confusionMatrix(factor(df_logistic$Ratio.), df_logistic$Num_adults, positive = "1")
+```
+
+```{r warning=FALSE, message=FALSE}
+# df_logistic2 <- df_logistic %>% filter(Year != 2022) %>% 
+#   group_by(Year, commune, Week) %>% 
+#   summarise(Ratio = max(Ratio), .groups = "drop")
+# 
+# reconstitution3 <- df_logistic2 %>% 
+#   ggplot(aes(as.factor(Week), commune, fill = Ratio)) + geom_tile() + 
+#   scale_fill_gradient2(low = "green", mid = "orange", high = "red", midpoint = 0.5) + 
+#   facet_wrap(~Year, ncol = 2) + theme_minimal() + 
+#   theme(axis.text.x = element_text(angle = 90, vjust = 0.5))
+# 
+# reconstitution3
+# ggsave("./2. Adult_results/reconstition3_GAM_logit.png", width = 14, height = 8)
+```
+
+
+```{r warning=FALSE, message=FALSE}
+# # les cartes
+# df_logistic2 <- myt_map_commune %>% select(commune) %>% left_join(df_logistic2, by = "commune")
+# logit_plots <- lapply(2018:2021, function(year){
+#   tm_object <- tm_shape(df_logistic2 %>% filter(Year == year)) +
+#     tm_polygons(col = "Ratio", midpoint = 0.5, palette = "-viridis", title = paste0("Ratio\n(", year, ")")) + 
+#     tm_facets(by = "Week")
+#   # saving the plot
+#   tmap_save(tm = tm_object, filename = paste0("./2. Adult_results/Reconstitution_map_LogitGAM_", year, ".pdf"))
+#   tmap_save(tm = tm_object, filename = paste0("./2. Adult_results/Reconstitution_map_LogitGAM_", year, ".png"))
+#   tm_object
+# })
+# 
+# logit_plots
+```
+
